@@ -1,4 +1,4 @@
-// ==================== main.cpp (ESP32 + ILI9341, serial Fs control + smaller HUD) ====================
+// ==================== main.cpp (ESP32 + ILI9341) ====================
 #include <Arduino.h>
 #include <SPI.h>
 #include <Ticker.h>
@@ -14,25 +14,25 @@
 #define TFT_SCLK  18
 #define TFT_MISO  19   // if your TFT has SDO; else use 5-arg ctor
 
-// ----------- Color palette Black on White -----------
-uint16_t COL_BG      = 0xFFFF; // White background
-uint16_t COL_TEXT    = 0x0000; // Black text (HUD + labels)
-uint16_t COL_TITLE   = 0x0000; // Black title
-uint16_t COL_AXIS    = 0x0000; // Black axis line
-uint16_t COL_TICKS   = 0x0000; // Black ticks
-uint16_t COL_GRID    = 0xC618; // Light gray (mean line)
-uint16_t COL_TRACE   = 0x0000; // Black waveform trace
-// ------------------------------------------------------------
+// // ----------- Color palette: white background, black text/ticks, light gray mean -----------
+// uint16_t COL_BG      = 0xFFFF; // White background
+// uint16_t COL_TEXT    = 0x0000; // Black text (HUD + labels)
+// uint16_t COL_TITLE   = 0x0000; // Black title
+// uint16_t COL_AXIS    = 0x0000; // Black axis line
+// uint16_t COL_TICKS   = 0x0000; // Black ticks
+// uint16_t COL_GRID    = 0xC618; // Light gray dashed mean line
+// uint16_t COL_TRACE   = 0x0000; // Black waveform trace
+// // -----------------------------------------------------------------------------------------
 
-// // ----------- Color palette White on Black -----------
-// uint16_t COL_BG      = 0x0000; // background (plot + banners)
-// uint16_t COL_TEXT    = 0xFFFF; // HUD + labels
-// uint16_t COL_TITLE   = 0xFFFF; // title text
-// uint16_t COL_AXIS    = 0xFFFF; // left axis line
-// uint16_t COL_TICKS   = 0xC618; // light gray ticks (optional)
-// uint16_t COL_GRID    = 0x4208; // dashed midline (dark gray)
-// uint16_t COL_TRACE   = 0xFFFF; // waveform trace (white)
-// // -------------------------------------------------------------
+// ----------- Color palette: Black background, white text/ticks, light gray mean  -----------
+uint16_t COL_BG      = 0x0000; // background (plot + banners)
+uint16_t COL_TEXT    = 0xFFFF; // HUD + labels
+uint16_t COL_TITLE   = 0xFFFF; // title text
+uint16_t COL_AXIS    = 0xFFFF; // left axis line
+uint16_t COL_TICKS   = 0xC618; // light gray ticks (optional)
+uint16_t COL_GRID    = 0x4208; // dashed midline (dark gray)
+uint16_t COL_TRACE   = 0xFFFF; // waveform trace (white)
+// -------------------------------------------------------------
 
 // Mic input pin (ADC1 recommended: 32,33,34,35,36,39). 36 = ADC1_CH0
 #define MIC_PIN   36
@@ -44,10 +44,10 @@ constexpr int SCREEN_H = 240;
 // --- Plot layout with top/bottom banners ---
 constexpr int PLOT_TOPBANNER    = 20;
 constexpr int PLOT_BOTTOMBANNER = 20;
-constexpr int PLOT_LMARGIN      = 34;   // was 38 → gives a bit more room for the title
+constexpr int PLOT_LMARGIN      = 34;   // left margin for Y axis & labels
 
 constexpr int PLOT_X0 = PLOT_LMARGIN;
-constexpr int PLOT_Y0 = PLOT_TOPBANNER;     // plot still starts below the top banner
+constexpr int PLOT_Y0 = PLOT_TOPBANNER;
 constexpr int PLOT_W  = SCREEN_W - PLOT_X0;
 constexpr int PLOT_H  = SCREEN_H - (PLOT_TOPBANNER + PLOT_BOTTOMBANNER);
 
@@ -65,10 +65,6 @@ constexpr uint8_t Level10 = 32;
 constexpr uint8_t Level11 = 33;
 constexpr uint8_t Level12 = 16;
 
-// Colors (RGB565)
-constexpr uint16_t Dark    = 0x4208; // dark grey for grid/dashes
-constexpr uint16_t White   = 0xFFFF;
-
 // -------------------- GLOBALS --------------------
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST, TFT_MISO);
 // If your display has no MISO/SDO pin, use this instead:
@@ -78,23 +74,23 @@ Ticker micTicker;
 volatile bool micTickFlag = false;
 
 // Adjustable sample frequency (Hz) via serial
-volatile uint32_t gSampleFreqHz = 4400;   // default
-constexpr uint32_t FS_MIN = 100;          // clamp limits
-constexpr uint32_t FS_MAX = 40000;        // Ticker-friendly range
+volatile uint32_t gSampleFreqHz = 6000;   // default
+constexpr uint32_t FS_MIN = 1000;
+constexpr uint32_t FS_MAX = 10000;
 
 // Horizontal stride (how many pixels we advance per plotted sample)
-volatile uint8_t xStep = 2;               // 1 = every pixel, 2 = every 2 pixels, etc.
+volatile uint8_t xStep = 4;               // 1 = every pixel, 2 = every 2 pixels, etc.
 constexpr uint8_t XSTEP_MIN = 1;
 constexpr uint8_t XSTEP_MAX = 8;
 
 // Trace thickness (vertical pixels). Adjustable.
-volatile uint8_t traceThick = 3;          // initial thickness = 3
+volatile uint8_t traceThick = 2;          // initial thickness = 3
 constexpr uint8_t THICK_MIN = 1;
 constexpr uint8_t THICK_MAX = 8;
 
 volatile int readings[PLOT_W];             // circular buffer in plot width
 uint16_t DCOffset = 0;                     // average mic DC in raw ADC units (0..4095)
-int midY = 0;                              // y of 1.65 V midline
+int midY = 0;                              // y of ~1.65 V midline
 
 // Dashed midline pattern (pixels)
 constexpr int DASH_ON  = 6;
@@ -117,7 +113,7 @@ uint16_t backgroundAt(int plotX, int y)
   if (y == midY) {
     int xInPlot = plotX - PLOT_X0;
     int phase = xInPlot % (DASH_ON + DASH_OFF);
-    if (phase < DASH_ON) return Dark;  // draw dash
+    if (phase < DASH_ON) return COL_GRID;   // use configured mean-line color
   }
   return COL_BG;
 }
@@ -164,8 +160,9 @@ void drawTitleBanner()
 
 void drawBottomBannerHUD()
 {
-  // Only fill within the plot width so the left scale strip stays untouched
-  tft.fillRect(PLOT_X0, SCREEN_H - PLOT_BOTTOMBANNER, PLOT_W, PLOT_BOTTOMBANNER, COL_BG);
+  // Clear BOTH the left scale strip and the plot region in the bottom banner area
+  tft.fillRect(0,       SCREEN_H - PLOT_BOTTOMBANNER, PLOT_LMARGIN, PLOT_BOTTOMBANNER, COL_BG);
+  tft.fillRect(PLOT_X0, SCREEN_H - PLOT_BOTTOMBANNER, PLOT_W,       PLOT_BOTTOMBANNER, COL_BG);
 
   tft.setTextColor(COL_TEXT, COL_BG);
   tft.setTextSize(1);
@@ -273,13 +270,11 @@ void setSampleFreq(uint32_t newFs)
 }
 
 // --- simple serial parser for Fs/Xstep/Thk ---
-// Accepts lines like:  f8000   fs=12000   fs 22050
-// Also keep existing single-char controls: [ ] { } and digits 1..8
+// Accepts:  f8000   fs=12000   fs 22050
 void handleSerial()
 {
   if (!Serial.available()) return;
 
-  // If first char is alpha 'f'/'F' then parse the whole line for a number
   int peekc = Serial.peek();
   if (peekc == 'f' || peekc == 'F') {
     String line = Serial.readStringUntil('\n'); // e.g. "f8000" or "fs=12000"
@@ -300,15 +295,13 @@ void handleSerial()
     return;
   }
 
-  // Otherwise handle single-byte controls immediately
+  // Single-byte controls
   int c = Serial.read();
   if (c == '[') setXStep(xStep > XSTEP_MIN ? xStep - 1 : XSTEP_MIN);
   if (c == ']') setXStep(xStep < XSTEP_MAX ? xStep + 1 : XSTEP_MAX);
   if (c >= '1' && c <= '8') setXStep(uint8_t(c - '0'));
-
   if (c == '{') setTraceThick(traceThick > THICK_MIN ? traceThick - 1 : THICK_MIN);
   if (c == '}') setTraceThick(traceThick < THICK_MAX ? traceThick + 1 : THICK_MAX);
-  // digits also set thickness if prefixed with 't' line (optional future)
 }
 
 void initVU()
@@ -359,7 +352,7 @@ void updateVU()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println(F("\nESP32 + ILI9341 scope (serial Fs + smaller HUD)"));
+  Serial.println(F("\nESP32 + ILI9341 scope (serial Fs + HUD)"));
   Serial.println(F("Commands: f8000  (or fs=12000) to set sample freq"));
 
   // ADC: 12-bit and ~0..3.3V range
@@ -451,6 +444,11 @@ void loop()
       if (y1 >= PLOT_Y0 + PLOT_H) y1 = PLOT_Y0 + PLOT_H - 1;
       for (int yy = y0; yy <= y1; ++yy) {
         tft.drawPixel(plotX, yy, COL_TRACE);
+      }
+      // Re-draw dashed midline on top so it never gets “stained” by the trace
+      int phase = (plotX - PLOT_X0) % (DASH_ON + DASH_OFF);
+      if (phase < DASH_ON) {
+        tft.drawPixel(plotX, midY, COL_GRID);
       }
       lastY[x] = y;
       lastThk[x] = traceThick;
