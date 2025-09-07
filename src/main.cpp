@@ -66,6 +66,11 @@ uint16_t DCOffset = 0;           // average mic DC in raw ADC units (0..4095)
 constexpr int Y_MIN = 0;
 constexpr int Y_MAX = SCREEN_H - 1;
 
+// Horizontal stride: how many pixels we advance per plotted sample
+volatile uint8_t xStep = 2;         // 1 = every pixel, 2 = every 2 pixels, etc.
+constexpr uint8_t XSTEP_MIN = 1;
+constexpr uint8_t XSTEP_MAX = 8;
+
 // -------------------- HELPERS --------------------
 // Map raw 12-bit ADC (0..4095) to screen Y (0..H-1), 0 = top
 static inline int adcToY_raw(int raw)
@@ -117,6 +122,24 @@ void drawBackground()
   tft.print("Fs: ");
   tft.print(SAMPLE_FREQ_HZ / 1000.0f, 1);
   tft.print(" kHz");
+
+  // Show current stride
+  tft.setCursor(160, SCREEN_H - 12);
+  tft.print("Xstep: ");
+  tft.print(xStep);
+}
+
+void setXStep(uint8_t newStep)
+{
+  if (newStep < XSTEP_MIN) newStep = XSTEP_MIN;
+  if (newStep > XSTEP_MAX) newStep = XSTEP_MAX;
+
+  if (newStep == xStep) return;
+  xStep = newStep;
+
+  // Clear prior trace (so gaps don’t leave ghosts)
+  tft.fillRect(0, 12, SCREEN_W, SCREEN_H - 24, Black);
+  drawBackground();
 }
 
 void initVU()
@@ -271,8 +294,9 @@ void loop()
       lastY[x] = -1;
     }
 
-    // next column (wrap)
-    x = (x + 1) % SCREEN_W;
+    // next column with adjustable stride (wrap)
+    x += xStep;
+    if (x >= SCREEN_W) x -= SCREEN_W;
   }
 
   // Update VU at ~100 Hz (non-critical timing)
@@ -282,6 +306,15 @@ void loop()
   { // 10ms
     lastVU = now;
     updateVU();
+  }
+  
+  // --- Serial controls for stride: '[' to decrease, ']' to increase ---
+  if (Serial.available()) {
+    int c = Serial.read();
+    if (c == '[') setXStep(xStep > XSTEP_MIN ? xStep - 1 : XSTEP_MIN);
+    if (c == ']') setXStep(xStep < XSTEP_MAX ? xStep + 1 : XSTEP_MAX);
+    // Optional: digits 1..8 set exact stride
+    if (c >= '1' && c <= '8') setXStep(uint8_t(c - '0'));
   }
 }
 // ==================== end main.cpp ====================
