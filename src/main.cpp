@@ -1,4 +1,4 @@
-// ==================== main.cpp (ESP32 + ILI9341, Y-axis scale) ====================
+// ==================== main.cpp (ESP32 + ILI9341, banners + axis + adjustable thickness) ====================
 #include <Arduino.h>
 #include <SPI.h>
 #include <Ticker.h>
@@ -50,13 +50,7 @@ constexpr uint8_t Level12 = 16;
 
 // Colors (RGB565)
 constexpr uint16_t Black   = 0x0000;
-constexpr uint16_t Dark    = 0x4208; // dark grey for grid (#2121 in 565)
-constexpr uint16_t Blue    = 0x001F;
-constexpr uint16_t Red     = 0xF800;
-constexpr uint16_t Green   = 0x07E0;
-constexpr uint16_t Cyan    = 0x07FF;
-constexpr uint16_t Magenta = 0xF81F;
-constexpr uint16_t Yellow  = 0xFFE0;
+constexpr uint16_t Dark    = 0x4208; // dark grey for grid/dashes
 constexpr uint16_t White   = 0xFFFF;
 
 // -------------------- GLOBALS --------------------
@@ -67,24 +61,47 @@ Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST, TFT_MISO);
 Ticker micTicker;
 volatile bool micTickFlag = false;
 
-// Horizontal stride: how many pixels we advance per plotted sample
+// Horizontal stride (how many pixels we advance per plotted sample)
 volatile uint8_t xStep = 2;         // 1 = every pixel, 2 = every 2 pixels, etc.
 constexpr uint8_t XSTEP_MIN = 1;
 constexpr uint8_t XSTEP_MAX = 8;
 
+// Trace thickness (vertical pixels). Adjustable.
+volatile uint8_t traceThick = 3;    // initial thickness = 3
+constexpr uint8_t THICK_MIN = 1;
+constexpr uint8_t THICK_MAX = 8;
+
 volatile int readings[PLOT_W];       // circular buffer in plot width
 uint16_t DCOffset = 0;               // average mic DC in raw ADC units (0..4095)
+int midY = 0;                        // y of 1.65 V midline
+
+// Dashed midline pattern (pixels)
+constexpr int DASH_ON  = 6;
+constexpr int DASH_OFF = 6;
 
 // -------------------- HELPERS --------------------
 static inline int adcToY_raw(int raw)
 {
   if (raw < 0) raw = 0;
   if (raw > 4095) raw = 4095;
-
   // scale into plot height, then offset by top banner
   int y = PLOT_Y0 + PLOT_H - 1 - ((uint32_t)raw * PLOT_H >> 12);
-
   return y;
+}
+
+// Background “color” at a plot pixel (restores dashed midline instead of erasing it)
+uint16_t backgroundAt(int plotX, int y)
+{
+  // only plot band
+  if (y < PLOT_Y0 || y >= PLOT_Y0 + PLOT_H) return Black;
+
+  // dashed midline preservation
+  if (y == midY) {
+    int xInPlot = plotX - PLOT_X0;
+    int phase = xInPlot % (DASH_ON + DASH_OFF);
+    if (phase < DASH_ON) return Dark;  // draw dash
+  }
+  return Black; // otherwise plain background
 }
 
 void IRAM_ATTR onMicTick() { micTickFlag = true; }
@@ -106,37 +123,70 @@ uint16_t estimateDCoffset(int numSamples)
   return (uint16_t)(sum / (uint32_t)numSamples);
 }
 
-void drawYAxisScale()
+void drawTitleBanner()
 {
-  // Axis background strip (left margin)
-  tft.fillRect(0, 0, PLOT_LMARGIN, SCREEN_H, Black);
+  // Top banner: keep it black; center the title text
+  tft.fillRect(0, 0, SCREEN_W, PLOT_TOPBANNER, Black);
 
-  // Axis line
-  tft.drawFastVLine(PLOT_LMARGIN - 1, 0, SCREEN_H, White);
+  const char* title = "Audio Signal Visualiser";
+  int len = strlen(title);
+  int textW = len * 6;        // GFX 5x7 font ~6 px/char at size 1
+  int x = (SCREEN_W - textW) / 2;
+  if (x < 0) x = 0;
 
-  // Ticks at 0.0V, 0.5V steps up to 3.0V, plus 3.3V
   tft.setTextColor(White, Black);
   tft.setTextSize(1);
+  tft.setCursor(x, 1);
+  tft.print(title);
+}
 
+void drawBottomBannerHUD()
+{
+  // Bottom banner (keep black) + HUD text within it
+  tft.fillRect(0, SCREEN_H - PLOT_BOTTOMBANNER, SCREEN_W, PLOT_BOTTOMBANNER, Black);
+  tft.setTextColor(White, Black);
+  tft.setTextSize(1);
+  tft.setCursor(PLOT_X0 + 2, SCREEN_H - PLOT_BOTTOMBANNER + 1);
+  tft.print("Fs:");
+  tft.print(SAMPLE_FREQ_HZ / 1000.0f, 1);
+  tft.print("kHz  Xstep:");
+  tft.print(xStep);
+  tft.print("  Thk:");
+  tft.print(traceThick);
+}
+
+void drawYAxisScale()
+{
+  // Axis background strip (left margin within plot band)
+  tft.fillRect(0, PLOT_Y0, PLOT_LMARGIN, PLOT_H, Black);
+
+  // Axis line (inside plot band only)
+  tft.drawFastVLine(PLOT_LMARGIN - 1, PLOT_Y0, PLOT_H, White);
+
+  // Helpers to place ticks within plot band
   auto yForVolt = [](float v)->int {
-    // Convert volts (0..3.3) to raw 0..4095 then to Y
     int raw = (int)roundf((v / 3.3f) * 4095.0f);
     return adcToY_raw(raw);
   };
 
-  // Dense small ticks every 0.1 V (optional)
+  tft.setTextColor(White, Black);
+  tft.setTextSize(1);
+
+  // Small ticks every 0.1V; major every 0.5V. All constrained to plot band.
   for (int i = 0; i <= 33; ++i) {
-    float v = i * 0.1f;                  // 0.0 .. 3.3
+    float v = i * 0.1f;                 // 0.0 .. 3.3
     int y = yForVolt(v);
-    if (y < 0 || y >= SCREEN_H) continue;
-    int tickLen = (i % 5 == 0) ? 6 : 3;  // major every 0.5 V
-    tft.drawFastHLine(PLOT_LMARGIN - 1 - tickLen, y, tickLen, (i % 5 == 0) ? White : Dark);
+    if (y < PLOT_Y0 || y >= PLOT_Y0 + PLOT_H) continue;
+    int tickLen = (i % 5 == 0) ? 6 : 3; // major every 0.5V
+    // draw ticks entirely to the left of the axis (won't invade plot area)
+    int xStart = PLOT_LMARGIN - 1 - tickLen;
+    tft.drawFastHLine(xStart, y, tickLen, (i % 5 == 0) ? White : Dark);
   }
 
-  // Labels every 0.5 V + top 3.3 V
+  // Labels every 0.5 V + 3.3 V, within plot band
   for (float v = 0.0f; v <= 3.31f; v += 0.5f) {
     int y = yForVolt(v);
-    if (y < 0 || y >= SCREEN_H) continue;
+    if (y < PLOT_Y0 || y >= PLOT_Y0 + PLOT_H) continue;
 
     char buf[8];
     dtostrf(v, 3, 1, buf); // "0.0" .. "3.0"
@@ -144,36 +194,29 @@ void drawYAxisScale()
     tft.print(buf);
     tft.print("V");
   }
-  // Label 3.3 V specifically
+  // 3.3 V specifically
   {
     int y = yForVolt(3.3f);
-    if (y >= 0 && y < SCREEN_H) {
+    if (y >= PLOT_Y0 && y < PLOT_Y0 + PLOT_H) {
       tft.setCursor(2, y - 4);
       tft.print("3.3V");
     }
   }
 }
 
-void drawBackground()
+void drawPlotBackground()
 {
-  // Clear plot area only; leave left scale untouched
+  // Clear plot area only; leave banners & left scale untouched
   tft.fillRect(PLOT_X0, PLOT_Y0, PLOT_W, PLOT_H, Black);
 
-  // Optional midline (approx 1.65V)
-  int midY = adcToY_raw((int)roundf((1.65f / 3.3f) * 4095.0f));
-  tft.drawFastHLine(PLOT_X0, midY, PLOT_W, Dark);
-
-  // Footer HUD in plot area (bottom row)
-  tft.setTextColor(White, Black);
-  tft.setTextSize(1);
-  tft.setCursor(PLOT_X0 + 2, SCREEN_H - 12);
-  tft.print("Fs: ");
-  tft.print(SAMPLE_FREQ_HZ / 1000.0f, 1);
-  tft.print(" kHz");
-
-  tft.setCursor(PLOT_X0 + 90, SCREEN_H - 12);
-  tft.print("Xstep: ");
-  tft.print(xStep);
+  // Dashed midline (~1.65V)
+  midY = adcToY_raw((int)roundf((1.65f / 3.3f) * 4095.0f));
+  int x = PLOT_X0;
+  while (x < PLOT_X0 + PLOT_W) {
+    int run = min(DASH_ON, PLOT_X0 + PLOT_W - x);
+    tft.drawFastHLine(x, midY, run, Dark);
+    x += DASH_ON + DASH_OFF;
+  }
 }
 
 void setXStep(uint8_t newStep)
@@ -182,10 +225,18 @@ void setXStep(uint8_t newStep)
   if (newStep > XSTEP_MAX) newStep = XSTEP_MAX;
   if (newStep == xStep) return;
   xStep = newStep;
+  drawBottomBannerHUD();
+  drawPlotBackground();
+}
 
-  // Clear plot area only
-  tft.fillRect(PLOT_X0, PLOT_Y0, PLOT_W, PLOT_H, Black);
-  drawBackground();
+void setTraceThick(uint8_t newThick)
+{
+  if (newThick < THICK_MIN) newThick = THICK_MIN;
+  if (newThick > THICK_MAX) newThick = THICK_MAX;
+  if (newThick == traceThick) return;
+  traceThick = newThick;
+  drawBottomBannerHUD();
+  drawPlotBackground();
 }
 
 void initVU()
@@ -236,11 +287,11 @@ void updateVU()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println(F("ESP32 + ILI9341 scope (with Y-axis scale)"));
+  Serial.println(F("ESP32 + ILI9341 scope (banners + axis + adjustable thickness)"));
 
-  // ADC: 12-bit and full 0..3.3V range
+  // ADC: 12-bit and ~0..3.3V range
   analogReadResolution(12);
-  analogSetPinAttenuation(MIC_PIN, ADC_11db);  // ~0..3.3V
+  analogSetPinAttenuation(MIC_PIN, ADC_11db);
   pinMode(MIC_PIN, INPUT);
 
   // TFT init
@@ -248,9 +299,10 @@ void setup()
   tft.setRotation(1);  // 320x240
   tft.setFont();
 
-  // Draw persistent left scale, then clear plot area
+  drawTitleBanner();
   drawYAxisScale();
-  drawBackground();
+  drawPlotBackground();
+  drawBottomBannerHUD();
 
   // VU LEDs
   initVU();
@@ -259,20 +311,21 @@ void setup()
   for (int i = 0; i < PLOT_W; ++i) readings[i] = 0;
 
   // DC offset
-  tft.setCursor(PLOT_X0 + 2, SCREEN_H/2 - 8);
+  tft.setCursor(PLOT_X0 + 2, PLOT_Y0 + 4);
   tft.setTextColor(White, Black);
   tft.print("Measuring DC Offset...");
   DCOffset = estimateDCoffset(256);
 
-  // Show measured offset (volts)
-  tft.fillRect(PLOT_X0, SCREEN_H/2 - 12, PLOT_W, 16, Black);
-  tft.setCursor(PLOT_X0 + 2, SCREEN_H/2 - 8);
+  // Show measured offset (volts) in top of plot band briefly
+  tft.fillRect(PLOT_X0, PLOT_Y0, PLOT_W, 12, Black);
+  tft.setCursor(PLOT_X0 + 2, PLOT_Y0 + 2);
   tft.print("DC: ");
   tft.print((DCOffset / 4095.0f) * 3.3f, 2);
   tft.print(" V");
   delay(600);
 
-  drawBackground();
+  drawPlotBackground();
+  drawBottomBannerHUD();
 
   // Start sampling
   startSampling(SAMPLE_FREQ_HZ);
@@ -280,21 +333,26 @@ void setup()
 
 void loop()
 {
-  static int x = 0;                   // column within plot area [0..PLOT_W-1]
-  static int lastY[PLOT_W];           // last drawn y for erasing
+  static int x = 0;                 // column within plot area [0..PLOT_W-1]
+  static int lastY[PLOT_W];         // last drawn center y for erasing
+  static uint8_t lastThk[PLOT_W];   // last thickness used at that column
   static bool inited = false;
 
   if (!inited) {
-    for (int i = 0; i < PLOT_W; ++i) lastY[i] = -1;
+    for (int i = 0; i < PLOT_W; ++i) { lastY[i] = -1; lastThk[i] = traceThick; }
     inited = true;
   }
 
-  // Serial controls for stride: '[' dec, ']' inc, digits 1..8 set exact
+  // Serial controls:
+  // '[' dec Xstep, ']' inc Xstep, digits '1'..'8' set Xstep
+  // '{' dec thickness, '}' inc thickness, digits '!'..'(' (shifted 1..8) optional set thickness
   if (Serial.available()) {
     int c = Serial.read();
     if (c == '[') setXStep(xStep > XSTEP_MIN ? xStep - 1 : XSTEP_MIN);
     if (c == ']') setXStep(xStep < XSTEP_MAX ? xStep + 1 : XSTEP_MAX);
     if (c >= '1' && c <= '8') setXStep(uint8_t(c - '0'));
+    if (c == '{') setTraceThick(traceThick > THICK_MIN ? traceThick - 1 : THICK_MIN);
+    if (c == '}') setTraceThick(traceThick < THICK_MAX ? traceThick + 1 : THICK_MAX);
   }
 
   // When the ticker fires, do one plotted sample
@@ -303,21 +361,37 @@ void loop()
 
     int plotX = PLOT_X0 + x;
 
-    // erase previous pixel if it was drawn
-    if (lastY[x] >= 0 && lastY[x] < SCREEN_H) {
-      tft.drawPixel(plotX, lastY[x], Black);
+    // erase previous vertical stroke (restore background per pixel)
+    if (lastY[x] >= PLOT_Y0 && lastY[x] < PLOT_Y0 + PLOT_H) {
+      int halfPrev = (int)lastThk[x] / 2;
+      int y0 = lastY[x] - halfPrev;
+      int y1 = y0 + lastThk[x] - 1;
+      if (y0 < PLOT_Y0) y0 = PLOT_Y0;
+      if (y1 >= PLOT_Y0 + PLOT_H) y1 = PLOT_Y0 + PLOT_H - 1;
+      for (int yy = y0; yy <= y1; ++yy) {
+        tft.drawPixel(plotX, yy, backgroundAt(plotX, yy));
+      }
     }
 
-    // sample mic (12-bit)
+    // sample mic (12-bit), store
     readings[x] = analogRead(MIC_PIN);
 
-    // draw new point (raw mapping; DC offset used only for VU)
+    // draw new vertical stroke with current thickness, restoring dashed midline on erase next time
     int y = adcToY_raw(readings[x]);
-    if (y >= 0 && y < SCREEN_H) {
-      tft.drawPixel(plotX, y, White);
+    if (y >= PLOT_Y0 && y < PLOT_Y0 + PLOT_H) {
+      int half = (int)traceThick / 2;
+      int y0 = y - half;
+      int y1 = y0 + traceThick - 1;
+      if (y0 < PLOT_Y0) y0 = PLOT_Y0;
+      if (y1 >= PLOT_Y0 + PLOT_H) y1 = PLOT_Y0 + PLOT_H - 1;
+      for (int yy = y0; yy <= y1; ++yy) {
+        tft.drawPixel(plotX, yy, White);
+      }
       lastY[x] = y;
+      lastThk[x] = traceThick;
     } else {
       lastY[x] = -1;
+      lastThk[x] = traceThick;
     }
 
     // advance column with adjustable stride
