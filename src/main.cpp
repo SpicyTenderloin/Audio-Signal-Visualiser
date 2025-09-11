@@ -1,4 +1,4 @@
-// ==================== main.cpp (ESP32 + ILI9341, ZOH + interpolated render) ====================
+// ==================== main.cpp (ESP32 + ILI9341, Px/Sample + interpolated render) ====================
 #include <Arduino.h>
 #include <SPI.h>
 #include <Ticker.h>
@@ -8,8 +8,6 @@
 // --- your custom fonts ---
 #include "Aurora4pt7b.h"  // small font: HUD, axis labels (aurora_244pt7b)
 #include "Aurora7pt7b.h"  // title font:                    (aurora_247pt7b)
-// If you also have a 10pt header, keep it unused or remove the include.
-// #include "Aurora10pt7b.h"
 
 // -------------------- USER SETTINGS --------------------
 // TFT pins (change if your wiring differs)
@@ -50,7 +48,7 @@ constexpr int PLOT_LMARGIN      = 38; // left margin for Y axis & labels
 
 constexpr int PLOT_X0 = PLOT_LMARGIN;
 constexpr int PLOT_Y0 = PLOT_TOPBANNER;
-constexpr int PLOT_W  = SCREEN_W - PLOT_X0;
+constexpr int PLOT_W  = SCREEN_W - PLOT_X0;                               // <-- plot width in pixels
 constexpr int PLOT_H  = SCREEN_H - (PLOT_TOPBANNER + PLOT_BOTTOMBANNER + XAXIS_HEIGHT);
 
 // VU LED pins (12 outputs)
@@ -69,9 +67,10 @@ volatile uint32_t gSampleFreqHz = 5000; // default Fs
 constexpr uint32_t FS_MIN = 1000;
 constexpr uint32_t FS_MAX = 20000;
 
-volatile uint8_t zoh = 2;               // default ZOH span (samples/pixels)
-constexpr uint8_t ZOH_MIN = 1;
-constexpr uint8_t ZOH_MAX = 10;
+// Display mapping: Pixels per Sample (Px/Sample)
+volatile uint8_t pxPerSample = 2;       // default span (pixels per sample)
+constexpr uint8_t PPS_MIN = 1;
+constexpr uint8_t PPS_MAX = 10;
 
 volatile uint8_t traceThick = 1;        // default thickness (px)
 constexpr uint8_t THICK_MIN  = 1;
@@ -88,11 +87,11 @@ int midY = 0;                  // y of ~1.65 V midline
 constexpr int DASH_ON  = 6;
 constexpr int DASH_OFF = 6;
 
-// Interpolated ZOH state (1-span lag)
+// Interpolated render state (lag one sample)
 volatile int s_prevRaw = 0;
 volatile int s_currRaw = 0;
 volatile int s_nextRaw = 0;
-volatile uint8_t interpIdx = 0; // 0..zoh-1
+volatile uint8_t interpIdx = 0; // 0..pxPerSample-1
 
 // -------------------- HELPERS --------------------
 void measureText(const GFXfont *font, const char *text, int *w, int *h) {
@@ -121,16 +120,11 @@ uint16_t backgroundAt(int plotX, int y) {
 
 void IRAM_ATTR onMicTick() { micTickFlag = true; }
 
-// pixels (columns) per second
-static inline float colsPerSec() {
-  return (float)gSampleFreqHz * (float)zoh;
-}
-
-// Ticker at Fs * zoh (one pixel per tick)
+// Ticker at Fs * Px/Sample (one pixel update per tick)
 void applyTicker() {
-  float rate = colsPerSec();
+  float rate = (float)gSampleFreqHz * (float)pxPerSample;
   if (rate < (float)FS_MIN)   rate = (float)FS_MIN;
-  if (rate > (float)FS_MAX * ZOH_MAX) rate = (float)FS_MAX * ZOH_MAX;
+  if (rate > (float)FS_MAX * PPS_MAX) rate = (float)FS_MAX * PPS_MAX;
   micTicker.detach();
   micTicker.attach(1.0f / rate, onMicTick);
 }
@@ -175,26 +169,26 @@ void drawBottomBannerHUD() {
   tft.setTextColor(COL_TEXT, COL_BG);
 
   char fsBuf[28]; snprintf(fsBuf, sizeof(fsBuf), "Fs: %.1fkHz", gSampleFreqHz / 1000.0f);
-  char zBuf[28];  snprintf(zBuf, sizeof(zBuf),  "ZOH: %u", (unsigned)zoh);
+  char ppsBuf[28];snprintf(ppsBuf, sizeof(ppsBuf), "Px/Sample: %u", (unsigned)pxPerSample);
   char thBuf[28]; snprintf(thBuf, sizeof(thBuf), "Thk: %upx", (unsigned)traceThick);
 
-  int16_t x1, y1; uint16_t wFs, hFs, wZ, hZ, wTh, hTh;
-  tft.getTextBounds(fsBuf, 0, 0, &x1, &y1, &wFs, &hFs);
-  tft.getTextBounds(zBuf,  0, 0, &x1, &y1, &wZ,  &hZ);
-  tft.getTextBounds(thBuf, 0, 0, &x1, &y1, &wTh, &hTh);
+  int16_t x1, y1; uint16_t wFs, hFs, wP, hP, wTh, hTh;
+  tft.getTextBounds(fsBuf,  0, 0, &x1, &y1, &wFs, &hFs);
+  tft.getTextBounds(ppsBuf, 0, 0, &x1, &y1, &wP,  &hP);
+  tft.getTextBounds(thBuf,  0, 0, &x1, &y1, &wTh, &hTh);
 
   const int gap = 16;
-  int totalW = (int)wFs + gap + (int)wZ + gap + (int)wTh;
+  int totalW = (int)wFs + gap + (int)wP + gap + (int)wTh;
   int startX = PLOT_X0 + (PLOT_W - totalW) / 2;
 
-  int textH = max((int)hFs, max((int)hZ, (int)hTh));
+  int textH = max((int)hFs, max((int)hP, (int)hTh));
   int baselineY = SCREEN_H - (PLOT_BOTTOMBANNER - textH) / 2;
 
   int x = startX;
   tft.setCursor(x, baselineY); tft.print(fsBuf);
   x += wFs + gap;
-  tft.setCursor(x, baselineY); tft.print(zBuf);
-  x += wZ + gap;
+  tft.setCursor(x, baselineY); tft.print(ppsBuf);
+  x += wP + gap;
   tft.setCursor(x, baselineY); tft.print(thBuf);
 }
 
@@ -277,92 +271,81 @@ void drawPlotBackground() {
   }
 }
 
-// X-axis time scale under plot (drawn AFTER plot & BEFORE bottom banner)
+// X-axis time scale under plot
 void drawXAxisScale() {
-  const int bandY = PLOT_Y0 + PLOT_H;   // top of x-axis band
-  // clear x-axis strip
-  tft.fillRect(PLOT_X0, bandY, PLOT_W, XAXIS_HEIGHT, COL_BG);
+  const int y0 = PLOT_Y0 + PLOT_H;
+  // clear the x-axis strip
+  tft.fillRect(PLOT_X0, y0, PLOT_W, XAXIS_HEIGHT, COL_BG);
 
   // axis baseline
-  tft.drawFastHLine(PLOT_X0, bandY, PLOT_W, COL_AXIS);
+  tft.drawFastHLine(PLOT_X0, y0, PLOT_W, COL_AXIS);
 
-  // time per pixel
-  const float cps = colsPerSec();   // pixels per second
-  const float dt  = 1.0f / cps;     // sec/pixel
-  const float T   = dt * PLOT_W;    // total span
+  // time per pixel = 1/(Fs * Px/Sample)
+  const float dt = 1.0f / (float(gSampleFreqHz) * float(pxPerSample));
+  const float totalSeconds = dt * PLOT_W;
 
-  // choose a "nice" major tick step targeting ~50 px
-  static const float steps[] = {
-    0.1e-3f, 0.2e-3f, 0.5e-3f,
-    1e-3f,   2e-3f,   5e-3f,
-    10e-3f,  20e-3f,  50e-3f,
-    0.1f,    0.2f,    0.5f,  1.0f,  2.0f
+  // choose a "nice" tick step (seconds)
+  const float steps[] = {
+    1e-4f, 2e-4f, 5e-4f,
+    1e-3f, 2e-3f, 5e-3f,
+    1e-2f, 2e-2f, 5e-2f,
+    1e-1f, 2e-1f, 5e-1f, 1.0f
   };
-  const float targetPx = 50.0f;
-
-  float step = steps[0];
-  float best = 1e9f;
-  for (size_t i=0;i<sizeof(steps)/sizeof(steps[0]);++i) {
+  float targetPx = 40.0f; // ~40 px between major ticks
+  float bestStep = steps[0];
+  float bestDiff = 1e9f;
+  for (size_t i = 0; i < sizeof(steps)/sizeof(steps[0]); ++i) {
     float px = steps[i] / dt;
-    float diff = fabsf(px - targetPx);
-    if (diff < best) { best = diff; step = steps[i]; }
+    float d  = fabsf(px - targetPx);
+    if (d < bestDiff) { bestDiff = d; bestStep = steps[i]; }
   }
-  int pxMajor = (int)roundf(step / dt);
-  if (pxMajor < 16) pxMajor = 16;   // avoid clutter
+  const float secPerMajor = bestStep;
+  const float pxPerMajorF = secPerMajor / dt;
+  const int   pxPerMajor  = (int)roundf(pxPerMajorF);
 
-  // label style
+  // labels every major; minor at half
   tft.setFont(&aurora_244pt7b);
   tft.setTextColor(COL_TEXT, COL_BG);
 
-  // vertically centered label baseline inside band
-  int16_t bx1, by1; uint16_t btw, bth;
-  tft.getTextBounds("Ag", 0, 0, &bx1, &by1, &btw, &bth);
-  const int baselineY = bandY + (XAXIS_HEIGHT - (int)bth)/2 + (int)bth;
-
-  // draw ticks/labels
-  for (int xpix = 0; xpix <= PLOT_W; xpix += pxMajor) {
-    const int x = PLOT_X0 + xpix;
-
-    // major tick into the band
-    tft.drawFastVLine(x, bandY, 6, COL_TICKS);
-
-    // time at this position
-    float t = xpix * dt;  // seconds
-    char lab[20];
-    if      (T < 5e-3f)  snprintf(lab, sizeof(lab), "%.0fus", t*1e6f);
-    else if (T < 1.0f)   snprintf(lab, sizeof(lab), "%.0fms", t*1e3f);
-    else                 snprintf(lab, sizeof(lab), "%.1fs",  t);
-
-    int16_t x1,y1; uint16_t tw,th;
+  for (int x = 0; x <= PLOT_W; x += pxPerMajor > 0 ? pxPerMajor : PLOT_W) {
+    int xx = PLOT_X0 + x;
+    // major tick
+    tft.drawFastVLine(xx, y0, 6, COL_TICKS);
+    // label
+    float t = x * dt; // seconds
+    char lab[16];
+    if (t >= 1.0f) {
+      snprintf(lab, sizeof(lab), "%.2fs", t);
+    } else if (t >= 1e-3f) {
+      snprintf(lab, sizeof(lab), "%.0fms", t * 1000.0f);
+    } else {
+      snprintf(lab, sizeof(lab), "%.0fus", t * 1e6f);
+    }
+    int16_t x1, y1; uint16_t tw, th;
     tft.getTextBounds(lab, 0, 0, &x1, &y1, &tw, &th);
-
-    // centered label; clamp within band width
-    int tx = x - (int)tw/2;
+    int tx = xx - (int)tw/2;
+    int ty = y0 + 10 + (int)th/2; // baseline inside strip
     if (tx < PLOT_X0) tx = PLOT_X0;
-    if (tx + (int)tw > PLOT_X0 + PLOT_W) tx = PLOT_X0 + PLOT_W - (int)tw;
+    if (tx + (int)tw > PLOT_X0 + PLOT_W) tx = PLOT_X0 + PLOT_W - tw;
+    tft.setCursor(tx, ty); tft.print(lab);
 
-    // clear a small box so text doesn’t clash with baseline
-    tft.fillRect(tx-1, baselineY - (int)th - 1, (int)tw + 2, (int)th + 2, COL_BG);
-    tft.setCursor(tx, baselineY);
-    tft.print(lab);
-
-    // minor tick halfway if it fits
-    int xm = x + pxMajor/2;
+    // minor in the middle of majors (if room)
+    int xm = xx + pxPerMajor/2;
     if (xm < PLOT_X0 + PLOT_W)
-      tft.drawFastVLine(xm, bandY, 3, COL_TICKS);
+      tft.drawFastVLine(xm, y0, 3, COL_TICKS);
   }
 }
 
 // -------------------- SETTINGS TWEAKERS --------------------
-void setZOH(uint8_t n) {
-  if (n < ZOH_MIN) n = ZOH_MIN;
-  if (n > ZOH_MAX) n = ZOH_MAX;
-  zoh = n;
+void setPxPerSample(uint8_t n) {
+  if (n < PPS_MIN) n = PPS_MIN;
+  if (n > PPS_MAX) n = PPS_MAX;
+  pxPerSample = n;
   interpIdx = 0;
   applyTicker();
+  drawBottomBannerHUD();
   drawPlotBackground();
   drawXAxisScale();
-  drawBottomBannerHUD();
 }
 
 void setTraceThick(uint8_t newThick) {
@@ -377,14 +360,13 @@ void setSampleFreq(uint32_t newFs) {
   if (newFs < FS_MIN) newFs = FS_MIN;
   if (newFs > FS_MAX) newFs = FS_MAX;
   startSampling(newFs);
-  drawPlotBackground();
-  drawXAxisScale();
   drawBottomBannerHUD();
+  drawXAxisScale();
 }
 
 // --- serial parser ---
 //  f8000 / fs=12000      → set Fs (Hz)
-//  z / Z                 → ZOH - / +
+//  p / P                 → Px/Sample - / +
 //  { / }                 → thickness - / +
 //  m                     → toggle midline
 void handleSerial() {
@@ -409,11 +391,11 @@ void handleSerial() {
   }
 
   int c = Serial.read();
-  if (c == 'z') setZOH(zoh > ZOH_MIN ? (uint8_t)(zoh - 1) : ZOH_MIN);
-  if (c == 'Z') setZOH(zoh < ZOH_MAX ? (uint8_t)(zoh + 1) : ZOH_MAX);
+  if (c == 'p') setPxPerSample(pxPerSample > PPS_MIN ? (uint8_t)(pxPerSample - 1) : PPS_MIN);
+  if (c == 'P') setPxPerSample(pxPerSample < PPS_MAX ? (uint8_t)(pxPerSample + 1) : PPS_MAX);
   if (c == '{') setTraceThick(traceThick > THICK_MIN ? (uint8_t)(traceThick - 1) : THICK_MIN);
   if (c == '}') setTraceThick(traceThick < THICK_MAX ? (uint8_t)(traceThick + 1) : THICK_MAX);
-  if (c == 'm' || c == 'M') { gShowMidline = !gShowMidline; drawPlotBackground(); drawXAxisScale(); }
+  if (c == 'm' || c == 'M') { gShowMidline = !gShowMidline; drawPlotBackground(); }
 }
 
 // -------------------- VU OUTPUTS --------------------
@@ -452,7 +434,7 @@ void updateVU() {
 // -------------------- SETUP / LOOP --------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println(F("Commands: f8000 | fs=12000 | z/Z ZOH | { } thick | m midline"));
+  Serial.println(F("Commands: f8000 | fs=12000 | p/P Px/Sample | { } thick | m midline"));
 
   // ADC
   analogReadResolution(12);
@@ -464,7 +446,7 @@ void setup() {
   tft.setRotation(1);
   tft.fillScreen(COL_BG);
 
-  // Static UI
+  // Static UI (order ensures no clipping)
   drawTitle();
   drawYAxisScale();
   drawPlotBackground();
@@ -501,7 +483,7 @@ void setup() {
   drawXAxisScale();
   drawBottomBannerHUD();
 
-  // Seed the 3-sample pipeline for interpolated ZOH
+  // Seed the 3-sample pipeline for interpolated rendering
   s_prevRaw = analogRead(MIC_PIN); delay(1);
   s_currRaw = analogRead(MIC_PIN); delay(1);
   s_nextRaw = analogRead(MIC_PIN);
@@ -539,13 +521,13 @@ void loop() {
       for (int yy = y0; yy <= y1; ++yy) tft.drawPixel(plotX, yy, backgroundAt(plotX, yy));
     }
 
-    // Interpolated ZOH rendering (lag one span)
+    // Interpolated rendering (lag one sample)
     int yPrev = adcToY_raw(s_prevRaw);
     int yCurr = adcToY_raw(s_currRaw);
     int dy = yCurr - yPrev;
 
-    int num = (int)interpIdx + 1; // 1..zoh
-    int y = yPrev + ((dy * num + (int)zoh/2) / (int)zoh);
+    int num = (int)interpIdx + 1; // 1..pxPerSample
+    int y = yPrev + ((dy * num + (int)pxPerSample/2) / (int)pxPerSample);
 
     // draw this pixel's vertical stroke
     if (y >= PLOT_Y0 && y < PLOT_Y0 + PLOT_H) {
@@ -572,7 +554,7 @@ void loop() {
 
     // Advance interpolation phase & sample pipeline when span completes
     ++interpIdx;
-    if (interpIdx >= zoh) {
+    if (interpIdx >= pxPerSample) {
       interpIdx = 0;
       s_prevRaw = s_currRaw;
       s_currRaw = s_nextRaw;
