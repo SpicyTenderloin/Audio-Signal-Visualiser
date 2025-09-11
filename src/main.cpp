@@ -10,7 +10,7 @@
 #include "Aurora7pt7b.h"  // large font: title
 #include "Aurora10pt7b.h" // really large
 
-// -------------------- USER SETTINGS --------------------
+// -------------------- USER SETTINGS --------------------aaa
 // TFT pins (change if your wiring differs)
 #define TFT_CS 5
 #define TFT_DC 21
@@ -64,7 +64,7 @@ Ticker micTicker;
 volatile bool micTickFlag = false;
 
 // Adjustable sample frequency (Hz) via serial
-volatile uint32_t gSampleFreqHz = 4500; // default
+volatile uint32_t gSampleFreqHz = 2500; // default
 constexpr uint32_t FS_MIN = 1000;
 constexpr uint32_t FS_MAX = 10000;
 
