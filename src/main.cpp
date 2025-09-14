@@ -66,10 +66,10 @@ volatile bool micTickFlag = false;
 // Sampling & visualization
 volatile uint32_t gSampleFreqHz = 6500; // default Fs
 constexpr uint32_t FS_MIN = 1000;
-constexpr uint32_t FS_MAX = 20000;
+constexpr uint32_t FS_MAX = 100000;
 
 // Display mapping: Pixels per Sample (Px/Sample)
-volatile uint8_t pxPerSample = 4; // default span (pixels per sample)
+volatile uint8_t pxPerSample = 3; // default span (pixels per sample)
 constexpr uint8_t PPS_MIN = 1;
 constexpr uint8_t PPS_MAX = 20;
 
@@ -558,8 +558,8 @@ void setup()
   drawTitle();
   drawYAxisScale();
   drawPlotBackground();
-  drawXAxisScale();
   drawBottomBannerHUD();
+  drawXAxisScale();
 
   initVU();
 
@@ -593,8 +593,8 @@ void setup()
 
   // Redraw background & UI
   drawPlotBackground();
-  drawXAxisScale();
   drawBottomBannerHUD();
+  drawXAxisScale();
 
   // Seed the 3-sample pipeline for interpolated rendering
   s_prevRaw = analogRead(MIC_PIN);
