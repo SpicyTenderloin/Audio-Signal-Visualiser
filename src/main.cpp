@@ -19,19 +19,19 @@
 #define MIC_PIN 36 // ADC1_CH0
 
 // Buttons (active-low with internal pull-ups)
-#define BTN_FS_DOWN 13
-#define BTN_FS_UP 12
-#define BTN_PX_DOWN 14
-#define BTN_PX_UP 27
-#define BTN_PAUSE 15
+#define BTN_FS_DOWN 12
+#define BTN_FS_UP 13
+#define BTN_PX_DOWN 15
+#define BTN_PX_UP 2
+#define BTN_PAUSE 0  
 
 // VU LEDs (6 levels) — outputs ONLY (34/35 are input-only on ESP32, so don't use them)
-#define VU1 25
-#define VU2 26
-#define VU3 32
-#define VU4 33
-#define VU5 2
-#define VU6 4
+#define VU1 14
+#define VU2 27
+#define VU3 26
+#define VU4 25
+#define VU5 33
+#define VU6 32
 
 // Screen geometry
 constexpr int SCREEN_W = 320;
@@ -63,6 +63,9 @@ uint16_t COL_TRACE = ILI9341_WHITE;
 
 // -------------------- GLOBALS --------------------
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST, TFT_MISO);
+
+// For 4" display
+// Adafruit_ILI9488 tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST, TFT_MISO);
 
 // Sampling & visualization
 volatile uint32_t gSampleFreqHz = 5000; // default Fs (Hz)
@@ -135,11 +138,22 @@ void initVU()
   for (uint8_t i = 0; i < 6; ++i)
     pinMode(pins[i], OUTPUT);
 }
+
 void setVU(uint8_t level)
 { // 0..6
   const uint8_t pins[6] = {VU1, VU2, VU3, VU4, VU5, VU6};
   for (uint8_t i = 0; i < 6; ++i)
     digitalWrite(pins[i], (i < level) ? HIGH : LOW);
+}
+
+void VUdance()
+{
+  for (int i = 0; i <= 6; ++i)
+  {
+    setVU(i);
+    delay(120);
+  }
+  setVU(0);
 }
 
 // -------------------- DRAWING --------------------
@@ -541,6 +555,8 @@ void setup()
   // VU LEDs
   initVU();
   setVU(0);
+
+  VUdance();
 
   tft.begin();
   tft.setRotation(1);
